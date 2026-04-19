@@ -1,0 +1,25 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Veri cache (yeniden uretilebilir)
+data/gadm_cache/
+geodata_cache/
+world_dem_z3.rds
+
+# Render ciktilari (~20-200 MB)
+renders/
+Rplots.pdf
+
+# Yedekler
+*_backup.R
+*_v1_ne10m.R
+*_v1_ne10m.rds
+archive.zip
+
+# Sistem
+.DS_Store
+Thumbs.db
+*.tmp
