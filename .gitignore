@@ -1,25 +1,73 @@
-# R
+# ============================================================
+# R / RStudio
+# ============================================================
 .Rhistory
 .RData
 .Rproj.user/
 *.Rproj
-
-# Veri cache (yeniden uretilebilir)
-data/gadm_cache/
-geodata_cache/
-world_dem_z3.rds
-
-# Render ciktilari (~20-200 MB)
-renders/
 Rplots.pdf
 
-# Yedekler
+# ============================================================
+# Editor / IDE ayarlari
+# ============================================================
+.vscode/
+.idea/
+
+# ============================================================
+# Veri cache (yeniden uretilebilir)
+# ============================================================
+data/gadm_cache/
+geodata_cache/
+data/world_dem_z3.rds
+data/brown_photostudio_02_4k.hdr
+
+# ============================================================
+# Render ciktilari (buyuk PNG/HTML ~20-200 MB)
+# ============================================================
+renders/
+01_*.png
+02_*.png
+03_*.png
+04_*.png
+05_*.png
+06_*.png
+07_*.png
+07_*_files/
+08_*.png
+07_interaktif_harita.html
+
+# ============================================================
+# Yedek / eski surum
+# ============================================================
 *_backup.R
 *_v1_ne10m.R
 *_v1_ne10m.rds
 archive.zip
 
+# ============================================================
+# Dev / test / kesif scriptleri (app calismasi icin gerekli degil)
+# ============================================================
+diagnose.R
+diagnose2.R
+test_wpp2024.R
+test_wpp2024b.R
+nufus_yogunlugu_projesi.R
+pacman.r
+batch_render.R
+render_dots.R
+render_world.R
+
+# ============================================================
+# Kullanilmayan ek dosyalar
+# ============================================================
+Wolrd Population Data.csv
+font.png
+images.jpg
+italy.png
+
+# ============================================================
 # Sistem
+# ============================================================
 .DS_Store
 Thumbs.db
 *.tmp

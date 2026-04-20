@@ -1,6 +1,26 @@
 # ============================================================
-# DUNYA NUFUS ANALIZI - SHINY DASHBOARD
-# BM WPP2024 Verisi (1950-2100)
+#  DUNYA NUFUS ANALIZI PANELI  —  ANA GIRIS DOSYASI (app.R)
+# ============================================================
+#  Interaktif cografya/demografi dashboard'u (R Shiny)
+#  Veri: BM WPP 2024 (1950-2100) + Worldometer 2025
+#
+#  Calistirma:
+#    R icinde:  shiny::runApp('.')
+#    veya terminal:  Rscript -e "shiny::runApp('.', launch.browser = TRUE)"
+#
+#  Ozellikler:
+#    - Interaktif dunya haritasi (6 metrik: nufus, yogunluk, buyume, TFR,
+#      yasam suresi, net goc) — yil slider'i 1950-2100
+#    - Tematik haritalar (goc, dogurganlik, yasam suresi, buyume,
+#      demografik gecis, bagimlilik orani, medyan yas, sehirlesme)
+#    - Yas piramidi karsilastirma (2 ulke yan yana)
+#    - Ulke karsilastirma (en fazla 4 ulke, zaman serileri + piramitler)
+#    - Yogunluk-buyume sacilim grafigi
+#    - 3D dunya haritasi (MapLibre) + cinema-kalitesinde rayshader render
+#    - Aranabilir/filtrelenebilir veri tablosu (CSV indirme)
+#
+#  Bagimli paketler: app.R asagida otomatik yukler.
+#  Onceden hazirlanmis veri: data/*.rds (data_hazirla.R ile uretildi)
 # ============================================================
 
 # UTF-8 encoding garantile (Windows uzerinde Turkce karakter sorunu icin)
@@ -399,6 +419,23 @@ fmt_sayi <- function(x, big.mark = ",") {
   ifelse(is.na(x), "-", format(round(x), big.mark = big.mark, scientific = FALSE))
 }
 
+# Yardimci: hover tooltip HTML'ini modern kart olarak uret
+# html_safe server scope'unda oldugu icin burada dogrudan htmltools::htmlEscape kullan
+ulke_tooltip_html <- function(isim, kita_tr_adi, deger_metni, deger_etiketi) {
+  esc <- htmltools::htmlEscape
+  kita_gecerli <- length(kita_tr_adi) > 0 && !is.na(kita_tr_adi) && nzchar(kita_tr_adi)
+  kita_str <- if (!kita_gecerli) "" else
+    sprintf("<div class='ulke-tooltip-kita'>&#127757; %s</div>", esc(kita_tr_adi))
+  deger_gecerli <- length(deger_metni) > 0 && !is.na(deger_metni) && nzchar(deger_metni)
+  deger_str <- if (!deger_gecerli) "-" else deger_metni
+  htmltools::HTML(sprintf(
+    "<div class='ulke-tooltip-baslik'>%s</div>%s<div class='ulke-tooltip-deger'><div class='deger'>%s</div><div class='deger-label'>%s</div></div>",
+    esc(if (length(isim) == 0 || is.na(isim)) "-" else isim),
+    kita_str, deger_str,
+    esc(if (length(deger_etiketi) == 0) "" else deger_etiketi)
+  ))
+}
+
 # Yardimci: ulke etiketleri (sik tipografi + zoom-bagli filtreleme)
 ekle_ulke_etiketleri <- function(map) {
   ortak_stil <- list(
@@ -471,8 +508,7 @@ ui <- page_navbar(
   id = "ana_nav",
   title = tags$span(
     tags$span(style = "font-size:22px;margin-right:8px;", HTML("&#127758;")),
-    tags$span(style = "font-weight:800;letter-spacing:-0.3px;", "D\u00fcnya N\u00fcfus Analizi"),
-    tags$span(style = "font-size:11px;opacity:0.65;margin-left:8px;font-weight:500;", "WPP 2024")
+    tags$span(style = "font-weight:800;letter-spacing:-0.3px;", "D\u00fcnya N\u00fcfus Analizi")
   ),
   window_title = "D\u00fcnya N\u00fcfus Analizi Paneli",
   theme = bs_theme(
@@ -497,9 +533,11 @@ ui <- page_navbar(
   nav_spacer(),
   nav_item(input_dark_mode(id = "dark_mode", mode = "light")),
   nav_item(tags$a(
-    href = "#", onclick = "return false;",
-    style = "color:rgba(255,255,255,0.7);font-size:12px;padding:0 8px;",
-    title = "Veri Kayna\u011f\u0131: BM WPP 2024",
+    href = "https://population.un.org/wpp/",
+    target = "_blank",
+    rel = "noopener noreferrer",
+    style = "color:rgba(255,255,255,0.7);font-size:12px;padding:0 8px;text-decoration:none;",
+    title = "Veri Kayna\u011f\u0131: BM WPP 2024 \u2014 resmi sayfaya git",
     HTML("&#128196; WPP 2024")
   )),
   header = tags$head(
@@ -647,6 +685,13 @@ ui <- page_navbar(
       }
       .shiny-spinner-output-container { min-height: 100px; }
 
+      /* Detay panelinde yil animasyonunda spinner/opaklik bozucu — devre disi */
+      #harita_detay.recalculating {
+        opacity: 1 !important;
+        pointer-events: auto !important;
+      }
+      #harita_detay.recalculating::after { display: none !important; }
+
       /* === KOYU MOD === */
       [data-bs-theme='dark'] body { background: #0b1120 !important; }
       [data-bs-theme='dark'] .card, [data-bs-theme='dark'] .bslib-card { background: #1e293b !important; color: #e2e8f0; }
@@ -698,6 +743,141 @@ ui <- page_navbar(
       .zoom-1 .tr-label-orta, .zoom-2 .tr-label-orta { display: none !important; }
       .zoom-1 .tr-label-kucuk, .zoom-2 .tr-label-kucuk,
       .zoom-3 .tr-label-kucuk, .zoom-4plus .tr-label-kucuk { display: none !important; }
+
+      /* === HARITA YIL ROZETI === */
+      .leaflet-control.yil-kontrol-wrap {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+        margin: 14px !important;
+      }
+      .yil-gosterge {
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.92) 0%, rgba(30, 41, 59, 0.92) 100%);
+        color: #ffffff;
+        font-family: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+        padding: 6px 16px 8px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.15);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        user-select: none;
+        pointer-events: none;
+        line-height: 1;
+      }
+      .yil-gosterge .yil-etiket {
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.6);
+        margin-bottom: 3px;
+      }
+      .yil-gosterge .yil-deger {
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: 1px;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* === ULKE HOVER TOOLTIP — MODERN KART === */
+      .leaflet-tooltip.ulke-tooltip-wrap {
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.96) 0%, rgba(30, 41, 59, 0.96) 100%) !important;
+        color: #ffffff !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 12px !important;
+        padding: 12px 16px !important;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.15) !important;
+        font-family: 'Plus Jakarta Sans', -apple-system, 'Segoe UI', sans-serif !important;
+        min-width: 180px;
+        white-space: normal;
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        pointer-events: none;
+      }
+      .leaflet-tooltip.ulke-tooltip-wrap:before { display: none !important; }
+      .ulke-tooltip-baslik {
+        font-size: 14px;
+        font-weight: 800;
+        letter-spacing: 0.3px;
+        color: #ffffff;
+        line-height: 1.15;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+      }
+      .ulke-tooltip-kita {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.65);
+        margin-top: 3px;
+        font-weight: 500;
+      }
+      .ulke-tooltip-deger {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255, 255, 255, 0.12);
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .ulke-tooltip-deger .deger {
+        font-family: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+        font-size: 20px;
+        font-weight: 800;
+        color: #22d3ee;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+        letter-spacing: 0.2px;
+      }
+      .ulke-tooltip-deger .deger-label {
+        font-size: 9px;
+        color: rgba(255, 255, 255, 0.55);
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+    ")),
+    tags$script(HTML("
+      // Harita polygonlarini silmeden fillColor + tooltip + yil rozeti guncelle (hizli animasyon)
+      $(document).on('shiny:connected', function() {
+        if (typeof Shiny === 'undefined') return;
+        Shiny.addCustomMessageHandler('updateMapColors', function(msg) {
+          var w = HTMLWidgets.find('#' + msg.map_id);
+          if (!w || typeof w.getMap !== 'function') return;
+          var map = w.getMap();
+          if (!map) return;
+          if (msg.ids && msg.colors) {
+            var byId = {};
+            for (var i = 0; i < msg.ids.length; i++) {
+              byId[msg.ids[i]] = { color: msg.colors[i], tip: msg.tooltips ? msg.tooltips[i] : null };
+            }
+            map.eachLayer(function(layer) {
+              var lid = layer.options && layer.options.layerId;
+              if (lid == null) return;
+              var u = byId[lid];
+              if (!u) return;
+              if (typeof layer.setStyle === 'function') {
+                layer.setStyle({ fillColor: u.color });
+              }
+              if (u.tip != null && typeof layer.getTooltip === 'function' && layer.getTooltip()) {
+                layer.setTooltipContent(u.tip);
+              }
+            });
+          }
+          if (msg.year != null) {
+            var badge = map.getContainer().querySelector('.yil-gosterge .yil-deger');
+            if (badge) badge.textContent = msg.year;
+          }
+        });
+      });
     "))
   ),
 
@@ -988,13 +1168,22 @@ ui <- page_navbar(
         helpText("En fazla 4 \u00fclke kar\u015f\u0131la\u015ft\u0131rabilirsin.")
       ),
       uiOutput("kars_ozet_kartlar"),
+      tags$div(style = "margin:10px 0 6px;font-size:13px;color:#64748b;font-weight:600;",
+               "\U0001F4C8 Zaman Serisi (t\u00fcm y\u0131llar) \u2014 her kart\u0131n sa\u011f \u00fcst\u00fcndeki butonla tam ekran a\u00e7abilirsin"),
       layout_columns(
-        col_widths = c(12),
+        col_widths = c(6, 6),
         card(full_screen = TRUE,
-             card_header(tags$span(icon("chart-line"), " Zaman Serisi (t\u00fcm y\u0131llar)"),
-                          tags$span(style = "margin-left:auto;font-size:11px;color:#64748b;",
-                                    "\U0001F5B1 Tam ekran i\u00e7in sa\u011f \u00fcstteki butona bas")),
-             plotlyOutput("kars_zaman", height = "1400px"))
+             card_header(tags$span(icon("users"), " N\u00fcfus (Milyon)")),
+             plotlyOutput("kars_zaman_pop", height = "460px")),
+        card(full_screen = TRUE,
+             card_header(tags$span(icon("baby"), " Do\u011furganl\u0131k (TFR)")),
+             plotlyOutput("kars_zaman_tfr", height = "460px")),
+        card(full_screen = TRUE,
+             card_header(tags$span(icon("heart-pulse"), " Ya\u015fam S\u00fcresi (y\u0131l)")),
+             plotlyOutput("kars_zaman_e0", height = "460px")),
+        card(full_screen = TRUE,
+             card_header(tags$span(icon("chart-line"), " B\u00fcy\u00fcme Oran\u0131 (%)")),
+             plotlyOutput("kars_zaman_gr", height = "460px"))
       ),
       card(card_header(tags$span(icon("people-group"), " Ya\u015f Piramitleri")),
            uiOutput("kars_piramitler"))
@@ -1338,9 +1527,9 @@ server <- function(input, output, session) {
       fill_renk <- pal(kirp)
     }
     fill_renk[is.na(fill_renk)] <- "#e0e0e0"
-    # Tooltip olustur
+    # Tooltip olustur — modern kart
+    kita_tr_vec <- kita_tr[sf_data$continent]
     etiketler <- lapply(seq_len(nrow(sf_data)), function(i) {
-      isim <- html_safe(sf_data$name_tr[i])
       deger_str <- if (is.na(sf_data$deger[i])) "-"
                    else if (metrik == "pop") fmt_sayi(sf_data$deger[i])
                    else if (metrik == "yogunluk") paste0(round(sf_data$deger[i], 1), " ki\u015fi/km\u00b2")
@@ -1349,7 +1538,7 @@ server <- function(input, output, session) {
                    else if (metrik == "goc") fmt_sayi(sf_data$deger[i])
                    else if (metrik == "e0") paste0(round(sf_data$deger[i], 1), " y\u0131l")
                    else round(sf_data$deger[i], 1)
-      htmltools::HTML(sprintf("<b>%s</b><br/>%s: %s", isim, legend_baslik, deger_str))
+      ulke_tooltip_html(sf_data$name_tr[i], kita_tr_vec[i], as.character(deger_str), legend_baslik)
     })
     list(sf_data = sf_data, fill_renk = fill_renk, pal = pal, legend_baslik = legend_baslik,
          metrik = metrik, etiketler = etiketler)
@@ -1381,20 +1570,48 @@ server <- function(input, output, session) {
         weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
         options = pathOptions(pane = "polygon_pane"),
         label = r0$etiketler,
-        labelOptions = labelOptions(textsize = "12px"),
+        labelOptions = labelOptions(className = "ulke-tooltip-wrap", textsize = "12px"),
         highlightOptions = highlightOptions(weight = 3, color = "#ffffff", fillOpacity = 1, bringToFront = FALSE)
       ) %>%
       ekle_ulke_etiketleri() %>%
       addLegend(
+        layerId = "legend",
         position = "bottomright", pal = r0$pal,
         values = factor(c("< 25", "25-50", "50-100", "100-200", "200-500", "500-1K", "1K+"),
                         levels = c("< 25", "25-50", "50-100", "100-200", "200-500", "500-1K", "1K+")),
         title = r0$legend_baslik, opacity = 0.9
+      ) %>%
+      addControl(
+        html = "<div class='yil-gosterge'><div class='yil-etiket'>YIL</div><div class='yil-deger'>2026</div></div>",
+        position = "topright",
+        layerId = "yil_kontrol",
+        className = "yil-kontrol-wrap"
       )
   })
 
+  # Harita JS hizli guncelleme yardimcisi: polygonu silmeden renk+tooltip+yil rozeti yolla
+  harita_hizli_guncelle <- function(map_id, sf_data, fill_renk, etiketler, yil = NULL) {
+    mesaj <- list(
+      map_id   = map_id,
+      ids      = as.character(sf_data$country_code),
+      colors   = as.character(fill_renk),
+      tooltips = vapply(etiketler, as.character, character(1))
+    )
+    if (!is.null(yil)) mesaj$year <- as.character(yil)
+    session$sendCustomMessage("updateMapColors", mesaj)
+  }
+
+  # Sadece yil rozetini guncelle (color/tooltip dokunmayan observer'lar icin)
+  harita_yil_rozeti <- function(map_id, yil) {
+    session$sendCustomMessage("updateMapColors", list(
+      map_id = map_id,
+      year   = as.character(yil)
+    ))
+  }
+
   # Harita guncelleme — yil veya metrik degistiginde (throttled)
   harita_yil_r <- reactive(input$harita_yil) %>% throttle(300)
+  .harita_prev_metrik <- reactiveVal("yogunluk")  # renderLeaflet ilk metrik
   observe({
     yil <- harita_yil_r()
     metrik <- input$harita_metrik
@@ -1406,46 +1623,33 @@ server <- function(input, output, session) {
     alan <- ulke_ref$Alan_km2[ref_idx]
 
     r <- harita_renk_hesapla(sf_data, dt, alan, metrik)
-    sf_data <- r$sf_data
-    fill_renk <- r$fill_renk
-    pal <- r$pal
-    legend_baslik <- r$legend_baslik
 
-    leafletProxy("ana_harita") %>%
-      clearGroup("ulkeler") %>%
-      clearGroup("cartodb_isimler") %>%
-      clearGroup("tr_isimler_buyuk") %>%
-      clearGroup("tr_isimler_orta") %>%
-      clearGroup("tr_isimler_kucuk") %>%
-      clearControls() %>%
-      addPolygons(
-        data = sf_data, group = "ulkeler",
-        layerId = sf_data$country_code,
-        fillColor = fill_renk,
-        weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
-        options = pathOptions(pane = "polygon_pane"),
-        label = r$etiketler,
-        labelOptions = labelOptions(textsize = "12px"),
-        highlightOptions = highlightOptions(
-          weight = 3, color = "#ffffff", fillOpacity = 1, bringToFront = FALSE
+    # Hizli yol: polygonlari silmeden sadece fillColor + tooltip + yil rozeti guncelle (JS)
+    harita_hizli_guncelle("ana_harita", r$sf_data, r$fill_renk, r$etiketler, yil = yil)
+
+    # Legend sadece metrik degisince yenilenir (yil degisimi global aralikta legend'i etkilemez)
+    prev_m <- isolate(.harita_prev_metrik())
+    if (!identical(prev_m, metrik)) {
+      .harita_prev_metrik(metrik)
+      leafletProxy("ana_harita") %>%
+        removeControl("legend") %>%
+        addLegend(
+          layerId = "legend",
+          position = "bottomright", pal = r$pal,
+          values = if (metrik == "yogunluk") {
+                     factor(c("< 25","25-50","50-100","100-200","200-500","500-1K","1K+"),
+                            levels = c("< 25","25-50","50-100","100-200","200-500","500-1K","1K+"))
+                   } else if (metrik == "pop") log10(pmax(global_pop_range, 1))
+                   else if (metrik == "buyume") global_buy_range
+                   else if (metrik == "tfr") global_tfr_range
+                   else if (metrik == "e0") global_e0_range
+                   else if (metrik == "goc") c(-global_mig_range, global_mig_range)
+                   else r$sf_data$deger[!is.na(r$sf_data$deger)],
+          title = r$legend_baslik, opacity = 0.9,
+          labFormat = if (metrik == "pop") labelFormat(transform = function(x) round(10^x))
+                      else labelFormat()
         )
-      ) %>%
-      ekle_ulke_etiketleri() %>%
-      addLegend(
-        position = "bottomright", pal = pal,
-        values = if (metrik == "yogunluk") {
-                   factor(c("< 25","25-50","50-100","100-200","200-500","500-1K","1K+"),
-                          levels = c("< 25","25-50","50-100","100-200","200-500","500-1K","1K+"))
-                 } else if (metrik == "pop") log10(pmax(global_pop_range, 1))
-                 else if (metrik == "buyume") global_buy_range
-                 else if (metrik == "tfr") global_tfr_range
-                 else if (metrik == "e0") global_e0_range
-                 else if (metrik == "goc") c(-global_mig_range, global_mig_range)
-                 else sf_data$deger[!is.na(sf_data$deger)],
-        title = legend_baslik, opacity = 0.9,
-        labFormat = if (metrik == "pop") labelFormat(transform = function(x) round(10^x))
-                    else labelFormat()
-      )
+    }
   })
 
   # Ulke tiklama ile sol panel guncellenir
@@ -1455,8 +1659,8 @@ server <- function(input, output, session) {
   })
 
   # Detay paneli (modern kart tasarimi)
-  # Harita detay icin veriyi memoize et (throttled + bindCache)
-  harita_yil_detay <- reactive(input$harita_yil) |> throttle(250)
+  # Animasyon sirasinda kart yeniden insa edilmesin diye debounce — slider durunca guncelle
+  harita_yil_detay <- reactive(input$harita_yil) |> debounce(400)
   detay_veri <- reactive({
     cc <- secili_ulke()
     yil <- harita_yil_detay()
@@ -1654,7 +1858,8 @@ server <- function(input, output, session) {
                                    xaxis = list(visible = FALSE),
                                    yaxis = list(visible = FALSE)) %>%
                             config(displayModeBar = FALSE))
-    piramit_ciz(cc, input$harita_yil, kompakt = TRUE)
+    # Animasyon sirasinda yeniden cizim yok — slider durunca guncelle
+    piramit_ciz(cc, harita_yil_detay(), kompakt = TRUE)
   })
 
   # ============================================================
@@ -1746,32 +1951,39 @@ server <- function(input, output, session) {
   # ============================================================
   # SEKME 4: YAS PIRAMIDI KARSILASTIRMA
   # ============================================================
+  # Piramit animasyonunda her frame'de yeniden cizim yapilmasin — debounce
+  pir_yil_d <- reactive(input$pir_yil) |> debounce(400)
+
   output$pir_baslik1 <- renderText({
-    if (is.null(input$pir_ulke1) || is.null(input$pir_yil)) return("")
+    yil <- pir_yil_d()
+    if (is.null(input$pir_ulke1) || is.null(yil)) return("")
     cc <- suppressWarnings(as.integer(input$pir_ulke1))
     if (is.na(cc)) return("")
     ref <- ulke_ref[country_code == cc]
-    if (nrow(ref) > 0) paste0(ref$name_tr, " (", input$pir_yil, ")") else ""
+    if (nrow(ref) > 0) paste0(ref$name_tr, " (", yil, ")") else ""
   })
   output$pir_baslik2 <- renderText({
-    if (is.null(input$pir_ulke2) || is.null(input$pir_yil)) return("")
+    yil <- pir_yil_d()
+    if (is.null(input$pir_ulke2) || is.null(yil)) return("")
     cc <- suppressWarnings(as.integer(input$pir_ulke2))
     if (is.na(cc)) return("")
     ref <- ulke_ref[country_code == cc]
-    if (nrow(ref) > 0) paste0(ref$name_tr, " (", input$pir_yil, ")") else ""
+    if (nrow(ref) > 0) paste0(ref$name_tr, " (", yil, ")") else ""
   })
 
   output$piramit1 <- renderPlotly({
-    if (is.null(input$pir_ulke1) || is.null(input$pir_yil)) return(bos_grafik("\u00dclke se\u00e7in", "\U0001F464"))
+    yil <- pir_yil_d()
+    if (is.null(input$pir_ulke1) || is.null(yil)) return(bos_grafik("\u00dclke se\u00e7in", "\U0001F464"))
     cc <- suppressWarnings(as.integer(input$pir_ulke1))
     if (is.na(cc)) return(bos_grafik("Ge\u00e7ersiz \u00fclke", "\u26A0\uFE0F"))
-    piramit_ciz(cc, input$pir_yil)
+    piramit_ciz(cc, yil)
   })
   output$piramit2 <- renderPlotly({
-    if (is.null(input$pir_ulke2) || is.null(input$pir_yil)) return(bos_grafik("\u00dclke se\u00e7in", "\U0001F464"))
+    yil <- pir_yil_d()
+    if (is.null(input$pir_ulke2) || is.null(yil)) return(bos_grafik("\u00dclke se\u00e7in", "\U0001F464"))
     cc <- suppressWarnings(as.integer(input$pir_ulke2))
     if (is.na(cc)) return(bos_grafik("Ge\u00e7ersiz \u00fclke", "\u26A0\uFE0F"))
-    piramit_ciz(cc, input$pir_yil)
+    piramit_ciz(cc, yil)
   })
 
   # ============================================================
@@ -1784,10 +1996,13 @@ server <- function(input, output, session) {
   # Helper: tematik harita verisi hazirla (renkler + etiketler)
   tema_hazirla <- function(yil, tip) {
     sf_data <- ulke_sf
+    deger_fmt <- function(v) ifelse(is.na(v), "-", as.character(v))
+    deger_etiketi <- ""
     if (tip == "goc") {
       d <- mig_dt[year == yil, .(country_code, val = mig)]
       legend_baslik <- "Net G\u00f6\u00e7"
-      etiket_metni <- function(s, v) sprintf("<b>%s</b><br/>Net G\u00f6\u00e7: %s", html_safe(s), fmt_sayi(v))
+      deger_etiketi <- "Net G\u00f6\u00e7"
+      deger_fmt <- function(v) ifelse(is.na(v), "-", fmt_sayi(v))
       sf_data$deger <- d$val[match(sf_data$country_code, d$country_code)]
       degerler <- sf_data$deger[!is.na(sf_data$deger)]
       if (length(degerler) == 0) return(NULL)
@@ -1797,8 +2012,8 @@ server <- function(input, output, session) {
     } else if (tip == "tfr") {
       d <- tfr_dt[year == yil, .(country_code, val = tfr)]
       legend_baslik <- "Do\u011furganl\u0131k (TFR)"
-      etiket_metni <- function(s, v) sprintf("<b>%s</b><br/>TFR: %s", html_safe(s),
-                                              ifelse(is.na(v), "-", round(v, 2)))
+      deger_etiketi <- "TFR"
+      deger_fmt <- function(v) ifelse(is.na(v), "-", as.character(round(v, 2)))
       sf_data$deger <- d$val[match(sf_data$country_code, d$country_code)]
       degerler <- sf_data$deger[!is.na(sf_data$deger)]
       if (length(degerler) == 0) return(NULL)
@@ -1807,8 +2022,8 @@ server <- function(input, output, session) {
     } else if (tip == "e0") {
       d <- e0_dt[year == yil, .(country_code, val = e0B)]
       legend_baslik <- "Ya\u015fam S\u00fcresi (y\u0131l)"
-      etiket_metni <- function(s, v) sprintf("<b>%s</b><br/>Ya\u015fam S\u00fcresi: %s y\u0131l", html_safe(s),
-                                              ifelse(is.na(v), "-", round(v, 1)))
+      deger_etiketi <- "Ya\u015fam S\u00fcresi"
+      deger_fmt <- function(v) ifelse(is.na(v), "-", paste0(round(v, 1), " y\u0131l"))
       sf_data$deger <- d$val[match(sf_data$country_code, d$country_code)]
       degerler <- sf_data$deger[!is.na(sf_data$deger)]
       if (length(degerler) == 0) return(NULL)
@@ -1816,8 +2031,8 @@ server <- function(input, output, session) {
     } else if (tip == "buyume") {
       d <- misc_dt[year == yil, .(country_code, val = growthrate)]
       legend_baslik <- "B\u00fcy\u00fcme (%)"
-      etiket_metni <- function(s, v) sprintf("<b>%s</b><br/>B\u00fcy\u00fcme: %s%%", html_safe(s),
-                                              ifelse(is.na(v), "-", round(v, 2)))
+      deger_etiketi <- "B\u00fcy\u00fcme"
+      deger_fmt <- function(v) ifelse(is.na(v), "-", paste0(round(v, 2), "%"))
       sf_data$deger <- d$val[match(sf_data$country_code, d$country_code)]
       degerler <- sf_data$deger[!is.na(sf_data$deger)]
       if (length(degerler) == 0) return(NULL)
@@ -1826,8 +2041,8 @@ server <- function(input, output, session) {
                           domain = c(-max_abs, max_abs), na.color = "#e0e0e0")
     } else if (tip == "yas") {
       legend_baslik <- "Medyan Ya\u015f (2025)"
-      etiket_metni <- function(s, v) sprintf("<b>%s</b><br/>Medyan Ya\u015f: %s", html_safe(s),
-                                              ifelse(is.na(v), "-", round(v, 1)))
+      deger_etiketi <- "Medyan Ya\u015f"
+      deger_fmt <- function(v) ifelse(is.na(v), "-", paste0(round(v, 1), " y\u0131l"))
       sf_data$deger <- wmeter_dt$wm_median_age[match(sf_data$country_code, wmeter_dt$country_code)]
       degerler <- sf_data$deger[!is.na(sf_data$deger)]
       if (length(degerler) == 0) return(NULL)
@@ -1835,8 +2050,8 @@ server <- function(input, output, session) {
                           domain = c(15, 50), na.color = "#e0e0e0")
     } else if (tip == "kent") {
       legend_baslik <- "\u015eehir N\u00fcfus % (2025)"
-      etiket_metni <- function(s, v) sprintf("<b>%s</b><br/>\u015eehirli: %s%%", html_safe(s),
-                                              ifelse(is.na(v), "-", round(v, 1)))
+      deger_etiketi <- "\u015eehirli N\u00fcfus"
+      deger_fmt <- function(v) ifelse(is.na(v), "-", paste0(round(v, 1), "%"))
       sf_data$deger <- wmeter_dt$wm_urban_pct[match(sf_data$country_code, wmeter_dt$country_code)]
       degerler <- sf_data$deger[!is.na(sf_data$deger)]
       if (length(degerler) == 0) return(NULL)
@@ -1845,7 +2060,11 @@ server <- function(input, output, session) {
     }
     fill_renk <- pal(sf_data$deger)
     fill_renk[is.na(fill_renk)] <- "#e0e0e0"
-    etiketler <- lapply(etiket_metni(sf_data$name_tr, sf_data$deger), htmltools::HTML)
+    kita_tr_vec <- kita_tr[sf_data$continent]
+    etiketler <- lapply(seq_len(nrow(sf_data)), function(i) {
+      ulke_tooltip_html(sf_data$name_tr[i], kita_tr_vec[i],
+                         deger_fmt(sf_data$deger[i]), deger_etiketi)
+    })
     list(sf_data = sf_data, fill_renk = fill_renk, pal = pal, degerler = degerler,
          etiketler = etiketler, legend_baslik = legend_baslik)
   }
@@ -1861,7 +2080,7 @@ server <- function(input, output, session) {
                                 options = providerTileOptions(noWrap = TRUE)) %>%
                setView(lng = 30, lat = 25, zoom = 2))
     }
-    leaflet(options = leafletOptions(minZoom = 2, maxZoom = 8, worldCopyJump = FALSE,
+    base_map <- leaflet(options = leafletOptions(minZoom = 2, maxZoom = 8, worldCopyJump = FALSE,
                                    maxBounds = list(list(-85, -180), list(85, 180)),
                                    maxBoundsViscosity = 1.0)) %>%
       addMapPane("zemin_pane", zIndex = 200) %>%
@@ -1872,39 +2091,38 @@ server <- function(input, output, session) {
                        options = providerTileOptions(pane = "zemin_pane", noWrap = TRUE)) %>%
       setView(lng = 30, lat = 25, zoom = 2) %>%
       addPolygons(data = r$sf_data, group = "veri",
+                  layerId = r$sf_data$country_code,
                   fillColor = r$fill_renk,
                   weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
                   options = pathOptions(pane = "polygon_pane"),
                   label = r$etiketler,
-                  labelOptions = labelOptions(textsize = "12px"),
+                  labelOptions = labelOptions(className = "ulke-tooltip-wrap", textsize = "12px"),
                   highlightOptions = highlightOptions(weight = 2, color = "#fff",
                                                       fillOpacity = 1, bringToFront = FALSE)) %>%
       ekle_ulke_etiketleri() %>%
-      addLegend(position = "bottomright", pal = r$pal, values = r$degerler,
+      addLegend(layerId = "legend", position = "bottomright", pal = r$pal, values = r$degerler,
                 title = r$legend_baslik, opacity = 0.85)
+    # Yil rozeti — sadece yila bagli tematik haritalarda
+    if (tip %in% c("goc", "tfr", "e0", "buyume")) {
+      base_map <- base_map %>% addControl(
+        html = "<div class='yil-gosterge'><div class='yil-etiket'>YIL</div><div class='yil-deger'>2026</div></div>",
+        position = "topright",
+        layerId = "yil_kontrol",
+        className = "yil-kontrol-wrap"
+      )
+    }
+    base_map
   }
 
-  # Helper: tematik haritayi guncelle
+  # Helper: tematik haritayi guncelle (hizli yol — polygonlari silmeden)
   tema_guncelle <- function(map_id, yil, tip) {
     r <- tema_hazirla(yil, tip)
     if (is.null(r)) return()
+    harita_hizli_guncelle(map_id, r$sf_data, r$fill_renk, r$etiketler, yil = yil)
+    # Legend her yil degisiminde yenilenmeli (pal domain yil verisine gore degisir)
     leafletProxy(map_id) %>%
-      clearGroup("veri") %>%
-      clearGroup("cartodb_isimler") %>%
-      clearGroup("tr_isimler_buyuk") %>%
-      clearGroup("tr_isimler_orta") %>%
-      clearGroup("tr_isimler_kucuk") %>%
-      clearControls() %>%
-      addPolygons(data = r$sf_data, group = "veri",
-                  fillColor = r$fill_renk,
-                  weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
-                  options = pathOptions(pane = "polygon_pane"),
-                  label = r$etiketler,
-                  labelOptions = labelOptions(textsize = "12px"),
-                  highlightOptions = highlightOptions(weight = 2, color = "#fff",
-                                                      fillOpacity = 1, bringToFront = FALSE)) %>%
-      ekle_ulke_etiketleri() %>%
-      addLegend(position = "bottomright", pal = r$pal, values = r$degerler,
+      removeControl("legend") %>%
+      addLegend(layerId = "legend", position = "bottomright", pal = r$pal, values = r$degerler,
                 title = r$legend_baslik, opacity = 0.85)
   }
 
@@ -1947,9 +2165,12 @@ server <- function(input, output, session) {
     suppressWarnings(as.integer(u))
   })
 
+  # Karsilastirma animasyonunda kartlar/piramitler her frame'de yeniden cizilmesin
+  kars_yil_d <- reactive(input$kars_yil) |> debounce(400)
+
   output$kars_ozet_kartlar <- renderUI({
     ccs <- kars_ccs()
-    yil <- input$kars_yil
+    yil <- kars_yil_d()
     if (length(ccs) == 0 || is.null(yil)) {
       return(tags$div(class = "tab-intro",
         tags$div(class = "tab-intro-body", "Kenar \u00e7ubu\u011funda en az 2 \u00fclke se\u00e7in.")))
@@ -1992,61 +2213,57 @@ server <- function(input, output, session) {
     tags$div(style = "display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;", kartlar)
   })
 
-  output$kars_zaman <- renderPlotly({
+  # Karsilastirma — zaman serisi metrik tanimlari (4 ayri grafik icin paylasilir)
+  .kars_zaman_metrikler <- list(
+    pop = list(dt = pop_dt,  col = "pop",        name = "N\u00fcfus (Milyon)",      olcek = 1e6, deger_fmt = "%{y:.2f}"),
+    tfr = list(dt = tfr_dt,  col = "tfr",        name = "TFR",                       olcek = 1,   deger_fmt = "%{y:.2f}"),
+    e0  = list(dt = e0_dt,   col = "e0B",        name = "Ya\u015fam S\u00fcresi (y\u0131l)", olcek = 1, deger_fmt = "%{y:.1f}"),
+    gr  = list(dt = misc_dt, col = "growthrate", name = "B\u00fcy\u00fcme (%)",         olcek = 1,   deger_fmt = "%{y:.2f}")
+  )
+
+  kars_zaman_ciz <- function(m_key) {
     ccs <- kars_ccs()
     if (length(ccs) == 0) return(bos_grafik("En az 1 \u00fclke se\u00e7in", "\U0001F30D"))
-    metrikler <- list(
-      list(key = "pop", dt = pop_dt, col = "pop", name = "N\u00fcfus (Milyon)", olcek = 1e6),
-      list(key = "tfr", dt = tfr_dt, col = "tfr", name = "TFR", olcek = 1),
-      list(key = "e0",  dt = e0_dt,  col = "e0B", name = "Ya\u015fam S\u00fcresi", olcek = 1),
-      list(key = "gr",  dt = misc_dt, col = "growthrate", name = "B\u00fcy\u00fcme %", olcek = 1)
-    )
-    alt <- lapply(metrikler, function(m) {
-      p <- suppressWarnings(plot_ly())
-      for (i in seq_along(ccs)) {
-        cc <- ccs[i]
-        ulke_adi <- ulke_ref[country_code == cc, name_tr]
-        if (length(ulke_adi) == 0) next
-        veri <- m$dt[country_code == cc, .(year, deger = get(m$col) / m$olcek)]
-        if (nrow(veri) == 0) next
-        goster <- (m$key == "pop")
-        p <- p %>% add_trace(data = veri, x = ~year, y = ~deger, type = "scatter", mode = "lines",
-                             line = list(color = kars_renkler[((i-1) %% 4) + 1], width = 3,
-                                          shape = "linear"),
-                             name = ulke_adi, legendgroup = ulke_adi, showlegend = goster,
-                             hovertemplate = paste0("<b>", ulke_adi, "</b><br>",
-                                                     "Y\u0131l: %{x}<br>",
-                                                     m$name, ": %{y:.2f}<extra></extra>"))
-      }
-      p %>% layout(
-        yaxis = list(title = list(text = m$name, font = list(size = 13, family = "Plus Jakarta Sans"),
-                                    standoff = 15),
-                      fixedrange = FALSE, tickfont = list(size = 11),
-                      gridcolor = "#f1f5f9", zerolinecolor = "#e2e8f0",
-                      automargin = TRUE, nticks = 5, ticksuffix = " "),
-        xaxis = list(range = c(1950, 2100), dtick = 25,
-                      tickfont = list(size = 11), gridcolor = "#f1f5f9"),
-        dragmode = "pan"
-      )
-    })
-    # 4 satir (tek sutun) — buyuk ve net, genis spacing
-    subplot(alt, nrows = 4, shareX = TRUE, titleY = TRUE, margin = 0.08) %>%
-      layout(xaxis = list(title = list(text = "Y\u0131l", font = list(size = 13)),
-                           fixedrange = FALSE,
-                           range = c(1950, 2100), dtick = 25,
-                           tickfont = list(size = 11)),
-             dragmode = "pan",
-             hovermode = "x unified",
-             legend = list(orientation = "h", y = -0.03, x = 0.5, xanchor = "center",
-                            font = list(size = 13, family = "Plus Jakarta Sans")),
-             margin = list(l = 90, r = 30, t = 30, b = 80),
-             plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff") %>%
-      config(displayModeBar = FALSE, scrollZoom = FALSE)
-  }) |> bindCache(input$kars_ulkeler)
+    m <- .kars_zaman_metrikler[[m_key]]
+    p <- suppressWarnings(plot_ly())
+    for (i in seq_along(ccs)) {
+      cc <- ccs[i]
+      ulke_adi <- ulke_ref[country_code == cc, name_tr]
+      if (length(ulke_adi) == 0) next
+      veri <- m$dt[country_code == cc, .(year, deger = get(m$col) / m$olcek)]
+      if (nrow(veri) == 0) next
+      p <- p %>% add_trace(data = veri, x = ~year, y = ~deger, type = "scatter", mode = "lines",
+                           line = list(color = kars_renkler[((i - 1) %% 4) + 1], width = 3),
+                           name = ulke_adi,
+                           hovertemplate = paste0("<b>", ulke_adi, "</b><br>",
+                                                   "Y\u0131l: %{x}<br>",
+                                                   m$name, ": ", m$deger_fmt, "<extra></extra>"))
+    }
+    p %>% layout(
+      yaxis = list(title = list(text = m$name, font = list(size = 13, family = "Plus Jakarta Sans"),
+                                  standoff = 15),
+                    fixedrange = FALSE, tickfont = list(size = 11),
+                    gridcolor = "#f1f5f9", zerolinecolor = "#e2e8f0", automargin = TRUE),
+      xaxis = list(title = list(text = "Y\u0131l", font = list(size = 12)),
+                    range = c(1950, 2100), dtick = 25,
+                    tickfont = list(size = 11), gridcolor = "#f1f5f9"),
+      dragmode = "pan",
+      hovermode = "x unified",
+      legend = list(orientation = "h", y = -0.18, x = 0.5, xanchor = "center",
+                     font = list(size = 12, family = "Plus Jakarta Sans")),
+      margin = list(l = 75, r = 25, t = 10, b = 80),
+      plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff"
+    ) %>% config(displayModeBar = FALSE, scrollZoom = FALSE)
+  }
+
+  output$kars_zaman_pop <- renderPlotly({ kars_zaman_ciz("pop") }) |> bindCache(input$kars_ulkeler)
+  output$kars_zaman_tfr <- renderPlotly({ kars_zaman_ciz("tfr") }) |> bindCache(input$kars_ulkeler)
+  output$kars_zaman_e0  <- renderPlotly({ kars_zaman_ciz("e0")  }) |> bindCache(input$kars_ulkeler)
+  output$kars_zaman_gr  <- renderPlotly({ kars_zaman_ciz("gr")  }) |> bindCache(input$kars_ulkeler)
 
   output$kars_piramitler <- renderUI({
     ccs <- kars_ccs()
-    yil <- input$kars_yil
+    yil <- kars_yil_d()
     if (length(ccs) == 0) return(tags$div(style = "padding:24px;text-align:center;color:#64748b;",
                                           "\u00dclke se\u00e7in"))
     genislik <- paste0(round(100 / length(ccs), 1), "%")
@@ -2066,7 +2283,7 @@ server <- function(input, output, session) {
 
   observe({
     ccs <- kars_ccs()
-    yil <- input$kars_yil
+    yil <- kars_yil_d()
     for (i in seq_along(ccs)) {
       local({
         idx <- i; cc_local <- ccs[idx]
@@ -2419,6 +2636,8 @@ server <- function(input, output, session) {
   output$veri_tablosu <- renderDT({
     dt <- tablo_veri()
     if (nrow(dt) == 0) return(datatable(data.frame()))
+    # Sade gorunum: 7 anahtar metrik. Niche olanlar (Net Goc, Bagimlilik, Dem. Gecis)
+    # CSV indirmede hala mevcut.
     gosterim <- dt[, .(
       "\u00dclke" = name_tr,
       "K\u0131ta" = kita_tr,
@@ -2426,20 +2645,37 @@ server <- function(input, output, session) {
       "Yo\u011funluk" = round(yogunluk, 1),
       "B\u00fcy\u00fcme (%)" = round(growthrate, 2),
       "TFR" = round(tfr, 2),
-      "Ya\u015fam S\u00fcresi" = round(e0B, 1),
-      "Net G\u00f6\u00e7" = mig,
-      "Ba\u011f. Oran\u0131 (%)" = bag_orani,
-      "Dem. Ge\u00e7i\u015f" = gecis_asamasi
+      "Ya\u015fam S\u00fcresi" = round(e0B, 1)
     )]
-    datatable(gosterim, filter = "top", rownames = FALSE,
-              options = list(pageLength = 25, scrollX = TRUE,
-                            language = list(
-                              search = "Ara:", lengthMenu = "_MENU_ sat\u0131r g\u00f6ster",
-                              info = "_TOTAL_ \u00fclkeden _START_ - _END_ arasi",
-                              paginate = list(previous = "\u00d6nceki", `next` = "Sonraki")
-                            ))) %>%
-      formatCurrency("\u00dclke", currency = "", digits = 0) %>%
-      formatRound("N\u00fcfus", digits = 0, mark = ",")
+    datatable(
+      gosterim,
+      filter = "top",
+      rownames = FALSE,
+      class = "compact stripe hover nowrap",
+      options = list(
+        pageLength = 20,
+        lengthMenu = c(10, 20, 50, 100),
+        scrollX = TRUE,
+        order = list(list(2, "desc")),  # Nufus'a gore cokten aza
+        columnDefs = list(
+          list(className = "dt-left",   targets = c(0, 1)),
+          list(className = "dt-right",  targets = c(2, 3, 4, 5, 6))
+        ),
+        language = list(
+          search = "Ara:", lengthMenu = "_MENU_ sat\u0131r g\u00f6ster",
+          info = "_TOTAL_ \u00fclkeden _START_\u2013_END_ aras\u0131",
+          infoEmpty = "Veri yok",
+          infoFiltered = "(_MAX_ \u00fclkeden filtrelendi)",
+          paginate = list(previous = "\u00d6nceki", `next` = "Sonraki"),
+          zeroRecords = "Sonu\u00e7 bulunamad\u0131"
+        )
+      )
+    ) %>%
+      formatRound("N\u00fcfus",         digits = 0, mark = ".") %>%
+      formatRound("Yo\u011funluk",     digits = 1, mark = ".", dec.mark = ",") %>%
+      formatRound("B\u00fcy\u00fcme (%)", digits = 2, dec.mark = ",") %>%
+      formatRound("TFR",                digits = 2, dec.mark = ",") %>%
+      formatRound("Ya\u015fam S\u00fcresi", digits = 1, dec.mark = ",")
   })
 
   output$tablo_indir_csv <- downloadHandler(
@@ -2524,12 +2760,18 @@ server <- function(input, output, session) {
     pal <- colorFactor(renkler, levels = seviyeler, na.color = "#e0e0e0")
     fill_renk <- pal(sf_data$asama_f)
     fill_renk[is.na(fill_renk)] <- "#e0e0e0"
+    kita_tr_vec <- kita_tr[sf_data$continent]
     etiketler <- lapply(seq_len(nrow(sf_data)), function(i) {
-      htmltools::HTML(sprintf("<b>%s</b><br/>%s<br/>TFR: %s | Ya\u015fam: %s",
-                              html_safe(sf_data$name_tr[i]),
-                              ifelse(is.na(asama[i]), "Veri yok", asama[i]),
-                              ifelse(is.na(tfr_val[i]), "-", round(tfr_val[i], 2)),
-                              ifelse(is.na(e0_val[i]), "-", round(e0_val[i], 1))))
+      alt_bilgi <- sprintf("TFR: %s \u2022 Ya\u015fam: %s",
+                           ifelse(is.na(tfr_val[i]), "-", round(tfr_val[i], 2)),
+                           ifelse(is.na(e0_val[i]), "-", round(e0_val[i], 1)))
+      htmltools::HTML(sprintf(
+        "<div class='ulke-tooltip-baslik'>%s</div>%s<div class='ulke-tooltip-deger'><div class='deger'>%s</div><div class='deger-label'>Ge\u00e7i\u015f A\u015famas\u0131</div></div><div style='margin-top:6px;font-size:10px;color:rgba(255,255,255,0.55);letter-spacing:0.3px;'>%s</div>",
+        html_safe(sf_data$name_tr[i]),
+        if (is.na(kita_tr_vec[i])) "" else sprintf("<div class='ulke-tooltip-kita'>&#127757; %s</div>", html_safe(kita_tr_vec[i])),
+        ifelse(is.na(asama[i]), "Veri yok", html_safe(asama[i])),
+        alt_bilgi
+      ))
     })
     list(sf_data = sf_data, fill_renk = fill_renk, pal = pal, etiketler = etiketler, seviyeler = seviyeler)
   }
@@ -2549,12 +2791,15 @@ server <- function(input, output, session) {
                   fillColor = r$fill_renk,
                   weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
                   options = pathOptions(pane = "polygon_pane"),
-                  label = r$etiketler, labelOptions = labelOptions(textsize = "12px"),
+                  label = r$etiketler, labelOptions = labelOptions(className = "ulke-tooltip-wrap", textsize = "12px"),
                   highlightOptions = highlightOptions(weight = 2, color = "#fff", fillOpacity = 1, bringToFront = FALSE)) %>%
       ekle_ulke_etiketleri() %>%
-      addLegend(position = "bottomright", pal = r$pal,
+      addLegend(layerId = "legend", position = "bottomright", pal = r$pal,
                 values = factor(r$seviyeler, levels = r$seviyeler),
-                title = "Demografik Ge\u00e7i\u015f", opacity = 0.85)
+                title = "Demografik Ge\u00e7i\u015f", opacity = 0.85) %>%
+      addControl(html = "<div class='yil-gosterge'><div class='yil-etiket'>YIL</div><div class='yil-deger'>2026</div></div>",
+                 position = "topright", layerId = "yil_kontrol",
+                 className = "yil-kontrol-wrap")
   })
   observe({
     yil <- input$tema_yil
@@ -2563,17 +2808,18 @@ server <- function(input, output, session) {
     r <- tema_hazirla_gecis(yil)
     leafletProxy("tema_gecis_harita") %>%
       clearGroup("veri") %>% clearGroup("tr_isimler_buyuk") %>% clearGroup("tr_isimler_orta") %>% clearGroup("tr_isimler_kucuk") %>%
-      clearControls() %>%
+      removeControl("legend") %>%
       addPolygons(data = r$sf_data, group = "veri",
                   fillColor = r$fill_renk,
                   weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
                   options = pathOptions(pane = "polygon_pane"),
-                  label = r$etiketler, labelOptions = labelOptions(textsize = "12px"),
+                  label = r$etiketler, labelOptions = labelOptions(className = "ulke-tooltip-wrap", textsize = "12px"),
                   highlightOptions = highlightOptions(weight = 2, color = "#fff", fillOpacity = 1, bringToFront = FALSE)) %>%
       ekle_ulke_etiketleri() %>%
-      addLegend(position = "bottomright", pal = r$pal,
+      addLegend(layerId = "legend", position = "bottomright", pal = r$pal,
                 values = factor(r$seviyeler, levels = r$seviyeler),
                 title = "Demografik Ge\u00e7i\u015f", opacity = 0.85)
+    harita_yil_rozeti("tema_gecis_harita", yil)
   })
 
   # ============================================================
@@ -2599,10 +2845,11 @@ server <- function(input, output, session) {
                         domain = c(20, 120), na.color = "#e0e0e0")
     fill_renk <- pal(pmax(pmin(sf_data$deger, 120), 20))
     fill_renk[is.na(fill_renk)] <- "#e0e0e0"
+    kita_tr_vec <- kita_tr[sf_data$continent]
     etiketler <- lapply(seq_len(nrow(sf_data)), function(i) {
-      htmltools::HTML(sprintf("<b>%s</b><br/>Ba\u011f\u0131ms\u0131zl\u0131k Oran\u0131: %s%%",
-                              html_safe(sf_data$name_tr[i]),
-                              ifelse(is.na(sf_data$deger[i]), "-", sf_data$deger[i])))
+      ulke_tooltip_html(sf_data$name_tr[i], kita_tr_vec[i],
+                         ifelse(is.na(sf_data$deger[i]), "-", paste0(sf_data$deger[i], "%")),
+                         "Ba\u011f\u0131ml\u0131l\u0131k Oran\u0131")
     })
     list(sf_data = sf_data, fill_renk = fill_renk, pal = pal, degerler = degerler, etiketler = etiketler)
   }
@@ -2623,11 +2870,14 @@ server <- function(input, output, session) {
                   fillColor = r$fill_renk,
                   weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
                   options = pathOptions(pane = "polygon_pane"),
-                  label = r$etiketler, labelOptions = labelOptions(textsize = "12px"),
+                  label = r$etiketler, labelOptions = labelOptions(className = "ulke-tooltip-wrap", textsize = "12px"),
                   highlightOptions = highlightOptions(weight = 2, color = "#fff", fillOpacity = 1, bringToFront = FALSE)) %>%
       ekle_ulke_etiketleri() %>%
-      addLegend(position = "bottomright", pal = r$pal, values = r$degerler,
-                title = "Ba\u011f\u0131ms\u0131zl\u0131k Oran\u0131 (%)", opacity = 0.85)
+      addLegend(layerId = "legend", position = "bottomright", pal = r$pal, values = r$degerler,
+                title = "Ba\u011f\u0131ms\u0131zl\u0131k Oran\u0131 (%)", opacity = 0.85) %>%
+      addControl(html = "<div class='yil-gosterge'><div class='yil-etiket'>YIL</div><div class='yil-deger'>2026</div></div>",
+                 position = "topright", layerId = "yil_kontrol",
+                 className = "yil-kontrol-wrap")
   })
   observe({
     yil <- input$tema_yil
@@ -2637,16 +2887,17 @@ server <- function(input, output, session) {
     if (is.null(r)) return()
     leafletProxy("tema_bag_harita") %>%
       clearGroup("veri") %>% clearGroup("tr_isimler_buyuk") %>% clearGroup("tr_isimler_orta") %>% clearGroup("tr_isimler_kucuk") %>%
-      clearControls() %>%
+      removeControl("legend") %>%
       addPolygons(data = r$sf_data, group = "veri",
                   fillColor = r$fill_renk,
                   weight = 0.8, color = "#334155", opacity = 0.55, fillOpacity = 1,
                   options = pathOptions(pane = "polygon_pane"),
-                  label = r$etiketler, labelOptions = labelOptions(textsize = "12px"),
+                  label = r$etiketler, labelOptions = labelOptions(className = "ulke-tooltip-wrap", textsize = "12px"),
                   highlightOptions = highlightOptions(weight = 2, color = "#fff", fillOpacity = 1, bringToFront = FALSE)) %>%
       ekle_ulke_etiketleri() %>%
-      addLegend(position = "bottomright", pal = r$pal, values = r$degerler,
+      addLegend(layerId = "legend", position = "bottomright", pal = r$pal, values = r$degerler,
                 title = "Ba\u011f\u0131ms\u0131zl\u0131k Oran\u0131 (%)", opacity = 0.85)
+    harita_yil_rozeti("tema_bag_harita", yil)
   })
 
   # ----------------------------------------------------------
